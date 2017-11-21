@@ -1,0 +1,17 @@
+accept
+bind
+connect
+get_socket_rm_fd
+inet_aton
+inet_ntoa
+listen
+netconf_get_assigned_address
+netconf_init
+recv
+select
+send
+setsockopt
+socket
+socket_lib_init
+socketclose
+socketlasterr

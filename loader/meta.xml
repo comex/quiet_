@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+  <name>qmod</name>
+  <version>VERSION</version>
+  <release_date>app release date</release_date>
+  <short_description>mod for Super Mario Maker</short_description>
+  <long_description>mod for Super Mario Maker</long_description>
+</app>

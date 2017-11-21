@@ -1,0 +1,11 @@
+BasedOnStyle: WebKit
+ColumnLimit: 90
+AlignAfterOpenBracket: Align
+AlwaysBreakAfterReturnType: AllDefinitions
+BinPackArguments: true
+BinPackParameters: true
+BreakBeforeBraces: Attach
+DerivePointerAlignment: false
+ForEachMacros: ['qdlist_foreach', 'uarray_foreach', 'uarray_foreach_byval', '_with', '_loop_with']
+PointerAlignment: Right
+Cpp11BracedListStyle: true

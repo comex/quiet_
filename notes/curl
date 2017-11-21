@@ -1,0 +1,10 @@
+b *0xe367d98
+commands
+silent
+printf "curl_easy_setopt(%p, %d, %p)", $r3, $r4, $r5
+if $r4 >= 10000 && $r4 < 20000 && $r5 != 0
+    printf " # %s", $r5
+end
+printf "\n"
+c
+end

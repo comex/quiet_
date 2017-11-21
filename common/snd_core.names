@@ -1,0 +1,11 @@
+AXAcquireVoice
+AXAcquireVoiceEx
+AXDeregisterAppFrameCallback
+AXFreeVoice
+AXRegisterAppFrameCallback
+AXSetVoiceType
+AXSetVoiceVe
+AXSetVoiceVeDelta
+AXUserBegin
+AXUserEnd
+AXUserIsProtected

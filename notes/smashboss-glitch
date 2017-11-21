@@ -1,0 +1,85 @@
+BlackPakkun Y pos:
+112 (init)
+191 <- 0x0d94ba14
+133 <- 0x0d7092a8
+134 <- 0x0d94ba14 [houdaisuper_stack_on_other; this:BlackPakkun other:Kuribo]
+133 <- 0x0d7092a8 [collider_i_lower_blackpak <<<< the same houdaisuper_stack_on_other]
+[continues to oscillate]
+so it's trying to move it up, but failing because it's stuck in a wall
+
+Houdai Y pos: never changes
+
+
+changed to the original setup where BlackPakkun teleports below:
+176 (init)
+255  <- 0x0d94ba14 [same, BP/Kuribo]
+this time it doesn't change
+on kill:
+256 <- 0x0d70900c [bumps_mario_up_for_collision]
+182 <- 0x0d7092a8 [collider_i_lower_blackpak]
+ydiff is -74
+
+the *only* [houdaisuper_stack_on_other] call is with this:BlackPakkun other:Kuribo; and once broken, it's never called
+
+colliderderp looks like
+
+0x2bc7fa0c:	2.86985925e-42	0	2.86985925e-42	0
+0x2bc7fa1c:	-8	-77	8	-63
+0x2bc7fa2c:	-8	-77	8	-63
+0x2bc7fa3c:	519.80603	169.899994	552.005981	200.100006
+0x2bc7fa4c:	519.80603	169.899994	552.005981	200.100006
+0x2bc7fa5c:	527.906006	178	543.906006	192
+
+rect40.y oscillates between
+    -77 <- 0x0d708814 (from rect10)
+    178 <- 0x0d70886c (adding cur_loc.y=255)
+    169.899994 <- 0x0d7088c0
+
+rect10.y: (set by nightmare)
+    3.40282347e+38=FLOAT_MAX <- 0x0d70848c
+    -70 <- 0x0d708600 [[this comes from triples_8c or triples_bc]]
+    -73 <- 0x0d708514
+    -77 <- 0x0d7086ac
+
+triples are set by init_collider_fields_sub based on houdaisuper.nonagram, from houdaisuper_stack_sets_triples
+
+and THAT comes from houdaisuper.4d0 = 73.; changing that makes it fall
+loc=255 old_loc=176
+
+both 4d0 and 4d4 are 0 for a muncher sandwiched between goombas... and one on top
+
+these both depend on the mysterious tower_flags{10} (200000)
+
+
+...okay, with
+
+  goomba [block]
+   hou
+___dai___ <- platform
+  black
+
+the goomba and black slowly float up on top...
+but only if we enter from a distance
+and only sometimes
+
+oh, I think the condition is *nonbot item of a stack is wedged into a block*
+it doesn't happen if it stops short
+it stops when the item gets out of the block
+so this is designed to unwedge it
+
+
+ETM is always made second.
+it's actually after an inner loop of each item
+
+hitrect_EnemyTowerManager is <0, 8, 8, 8>
+hitrect_BlackPakkun is *same*
+hitrect_Kuribo is same
+
+wait a sec, is there no static collision? ...but that's impossible
+
+I get it.  The platform spawns first!  And it depends on the platform's position (in the case of non-blue platforms)
+
+nonagram:
+-4  4  0
+ 0  0 10
+ 3  8  8

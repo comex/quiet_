@@ -1,0 +1,57 @@
+ash0_read_n_bits:
+    if n + f0 > 32:
+        r3 = 32 - n
+        word = *(u32*)(buf + off); off += 4
+        shift = 64 - (n + f0)
+        ret = (cur_word >> (32 - n)) | (word >> shift)
+        cur_word = (word << (f0 + n - 32))
+    else:
+        if f0 == 0:
+            cur_word = *(u32*)(buf + off); off += 4
+        ret = cur_word >> (32 - n)
+        cur_word <<= n
+        f0 = (f0 + n) & 0x1f
+            
+ash0_sub(r3, ash0obj, obuf1: *short, obuf2: *short, nbits):
+    if read_n_bits(1) == 0:
+        return read_n_bits(nbits)
+    else:
+        ret = ash0obj.f4
+        idx = ++ash0obj.f4
+        obuf1[idx] = ash0_sub(same args)
+        obuf2[idx] = ash0_sub(same args)
+        return ret
+
+
+the_actual_ash0_parser:
+    obj2.off = 0xc
+    obj1.off = o1_off_and_bits & ~3
+    if (compressed_size & 2):
+        r20 = read_n_bits(obj2, 0x20)
+    else:
+        r20 = weird_read_n_bits(obj2, 9)
+    if (compressed_size & 1):
+        r21 = read_n_bits(obj1, 0x20)
+    else:
+        r21 = weird_read_n_bits(obj1, 11)
+        if 0 > uncsize: break
+    main_loop:
+    while ubufidx < uncsize:
+        r28 = r20
+        while r28 >= 0x200:
+            if read_n_bits(obj2, 1):
+                r28 = o2_obuf2[r28]
+            else:
+                r28 = o2_obuf1[r28]
+        if r28 < 0x100:
+            ubuf[ubufidx++] = r28 (as char)
+        else:
+            r29 = r21
+            while r29 >= 0x800:
+                if read_n_bits(obj1, 1):
+                    r29 = o1_obuf2[r29]
+                else:
+                    r29 = o1_obuf1[r29]
+            memmove(&ubuf[ubufidx], &ubuf[ubufidx - r29], r28 - 0xfd)
+            
+

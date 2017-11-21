@@ -1,0 +1,170 @@
+(both with 8 tiles of space, not including spring)
+
+shell with spring on right:
+    0: right
+    1: first left movement
+    21: left
+    22: firt right movement
+    46: right
+
+bouncing shell:
+    0: right
+    1: first left movement
+    31: left
+    32: first right movement
+    62: right
+
+x positions of top pakkun after stepdown, based on bottom bit block offset:
+
+stepdown:
+| in block offset | top pakkun x          |
+| -1              | 232.54098510742188
+| 0               | 233.07763671875       |
+| 1               | 233.4242706298828     |
+| 2               | 224.53817749023438 (?) |
+| 3               | 224.53817749023438 (??)   |
+
+
+
+ver 2:
+
+  854.7584228515625
+  854.7924194335938
+  854.7924194335938
+
+  854.8403930664062
+
+
+pos(pakkun) < (<=?) pos(pswitch) + 16
+very simple.
+the pakkun keeps falling by .1875 and that brings it in range
+
+
+given a muncher on a platform, and a floating pswitch slowly moving left toward it, one block under
+the hit happens at
+    BlackPakkun: 1288,144
+    PSwitch:     1300,128
+
+if PSwitch is even slightly higher, no hit *if BP is on ground *
+    y+0.01 - hit
+    y+0.02 - no hit
+lower is also tight:
+    y-0.15 - hit
+    y-0.20 - no hit
+
+
+if BP is floating (zero grav):
+PSwitch loc:
+    y-0.15   nothing
+    y-1      nothing
+    y-0.001  nothing
+    y+0      hit
+    y+2      hit
+    y+4      hit
+    y+5      passes through
+    y+6.5    gets nudge
+    y+8      collides
+
+hit details:
+y+0
+    PSwitch: 196.000000,128.000000
+    muncher: 184.000000,144.000000
+y+2
+    PSwitch: 196.000000,130.000000
+    muncher: 184.000000,144.000000
+y+4
+    PSwitch: 196.000000,132.000000
+    muncher: 184.000000,144.000000
+
+--> so x is consistent.
+
+
+with muncher stacked on boo
+PSwitch loc:
+(based on muncher - 16)
+    y+0     nothing
+    y+2     nothing
+    y+4     nothing
+    y+6.5   gets nudge
+    y+8     collides
+
+with giant muncher fallen onto muncher stacked on boo
+** this works well because P colliding with little muncher fixes X **
+    y-2     nothing; after turning, hit after delay
+                muncher: 193.239151,157.940674
+                PSwitch: 201.142776,141.000000
+    y-1     nothing; after turning, hit
+                muncher: 192.003220,158.808990
+                PSwitch: 200.000000,142.000000
+    y-0.5   nothing; after turning, hit
+                muncher: 192.003220,158.808990
+                PSwitch: 200.000000,142.500000
+    y+0     hit
+                muncher: 192.000000,158.812500
+                PSwitch: 212.000000,143.000000
+    y+1     nothing; after turning, just pushes
+
+-> with stacked giant muncher, even if I teleport it to the right, it doesn't
+trigger unless it's gone so far that it falls off the stack 
+
+
+so we want to put P's y%16 at 14..15
+
+
+this *almost* works:
+MM
+MM    (MM = giant muncher, m = muncher, b = boo, p = pswitch, -- = blue plat)
+
+mp
+bm
+ m
+--
+
+BlackPakkun(2d) @ 200.000000,111.949997 [8.000000,15.949997]
+BlackPakkun(2d) @ 200.000000,125.949997 [8.000000,13.949997]
+BlackPakkun(2d) @ 184.000000,143.000000 [8.000000,15.000000]
+PSwitch(1c) @ 200.000000,141.949997 [8.000000,13.949997]
+BlackPakkun(2e) @ 192.000000,159.000000 [0.000000,15.000000]
+
+at collision time:
+
+BlackPakkun(2d) @ 200.000000,111.949997 [8.000000,15.949997]
+BlackPakkun(2d) @ 200.000000,125.949997 [8.000000,13.949997]
+BlackPakkun(2d) @ 184.000000,142.090454 [8.000000,14.090454]
+PSwitch(1c) @ 200.000000,141.949997 [8.000000,13.949997]
+BlackPakkun(2e) @ 192.000000,157.902954 [0.000000,13.902954]
+
+if P is not stacked, then muncher hits it without turning:
+
+BlackPakkun(2d) @ 200.000000,111.949997 [8.000000,15.949997]
+BlackPakkun(2d) @ 200.000000,125.949997 [8.000000,13.949997]
+BlackPakkun(2d) @ 184.000000,143.000000 [8.000000,15.000000]
+PSwitch(1c) @ 200.000000,141.949997 [8.000000,13.949997]
+BlackPakkun(2e) @ 192.000000,156.687500 [0.000000,12.687500]
+
+...but if P is floating at this exact position, there's no hit.
+
+but if muncher *falls*, there is.
+so it needs to arrive there *after* muncher
+
+found working setup??
+
+BlackPakkun(2d) @ 200.000000,125.949997 [8.000000,13.949997]
+BlackPakkun(2d) @ 184.003220,142.996490 [8.003220,14.996490]
+PSwitch(1c) @ 205.810013,141.949997 [13.810013,13.949997]
+BlackPakkun(2e) @ 192.003220,158.808990 [0.003220,14.808990]
+
+this is frame 7.  not sure we can do better
+
+only one X pos change before it touches:
+
+    Old value = 192
+    New value = 192.00322
+    0x0d6954a4 in ?? ()
+    (gdb) c
+    Continuing.
+    Thread 55 "Default Core 1" hit Breakpoint 1, 0x0dc30b20 in ?? ()
+
+->
+from a standing position, Mario can grab a coin from coin wall before it turns to a block from leftmost position not blocked by a wall one tile left.
+but only slightly to the left and he can't, even running!

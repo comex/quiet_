@@ -1,0 +1,6 @@
+UhsAcquireInterface
+UhsAdministerEndpoint
+UhsClientOpen
+UhsQueryInterfaces
+UhsSubmitBulkRequestAsync
+UhsSubmitControlRequest
