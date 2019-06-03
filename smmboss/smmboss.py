@@ -21,6 +21,12 @@ class RPL:
     def __repr__(self):
         return 'RPL(name=%r, text=%r, data=%r, rodata=%r)' % (self.name, self.text, self.data, self.rodata)
 
+def to_addr(x):
+    if hasattr(x, 'addr'):
+        return x.addr
+    else:
+        return x
+
 class MemrwGuest(Guest):
     def __init__(self, host, port):
         self.sock = socket.socket()
@@ -44,11 +50,11 @@ class MemrwGuest(Guest):
     def slide_text(self, addr):
         return (addr + self.text_slide) & 0xffffffff
     def unslide_text(self, addr):
-        return (addr - self.text_slide) & 0xffffffff
+        return (to_addr(addr) - self.text_slide) & 0xffffffff
     def slide_data(self, addr):
         return (addr + self.data_slide) & 0xffffffff
     def unslide_data(self, addr):
-        return (addr - self.data_slide) & 0xffffffff
+        return (to_addr(addr) - self.data_slide) & 0xffffffff
 
     def recvall(self, size):
         data = b''
@@ -140,6 +146,11 @@ class Size2D(GuestStruct):
     h = prop(4, f32)
     sizeof_star = 8
 
+class Rect(GuestStruct):
+    min = prop(0, Point2D)
+    max = prop(8, Point2D)
+    sizeof_star = 0x10
+
 class TT2(GuestStruct):
     cb_direct = prop(0xc, u32)
     sizeof_star = 0x10
@@ -169,12 +180,15 @@ class GuestMethodPtr(GuestStruct):
     sizeof_star = 8
     def target_for(self, obj):
         vtable_idx = self.vtable_idx
+        callback_or_offset_to_vt = self.callback_or_offset_to_vt
         this = obj.raw_offset(self.offset_to_this, GuestPtr)
-        if vtable_idx >= 0x8000:
-            return this, self.callback_or_offset_to_vt
+        if vtable_idx == 0 and callback_or_offset_to_vt == 0:
+            return None, None
+        elif vtable_idx >= 0x8000:
+            return this, callback_or_offset_to_vt
         else:
-            vtable = this.raw_offset(self.callback_or_offset_to_vt, GuestPtrPtr).get()
-            callback = vtable.raw_offset(8 * vtable_idx + 4, GuestU32Ptr).get()
+            vtable = this.raw_offset(callback_or_offset_to_vt, GuestPtrPtr).get()
+            callback = vtable.raw_offset(8 * vtable_idx + 4, u32).get()
             return this, callback
 
 class StateMgr(GuestStruct):
@@ -189,18 +203,20 @@ class StateMgr(GuestStruct):
     cb3s = prop(0x3c, count_ptr(GuestMethodPtr))
     def print_cbs(self):
         target_obj = self.target_obj
-        print('target_obj=%s' % (target_obj,))
+        print('# target_obj=%s; state=0x%x oldstate=0x%x counter=0x%x' % (target_obj, self.state, self.oldstate, self.counter))
         names = []
         for i in range(len(self.state_list)):
-            nme = self.state_list[i].name
+            name = self.state_list[i].name
             names.append(name)
             print('# %#x: %s' % (i, name))
         for i, name in enumerate(names):
             for kind in ['cb1', 'cb2', 'cb3']:
                 meth = getattr(self, kind + 's')[i]
                 _, target = meth.target_for(target_obj)
+                if target is None:
+                    continue
                 target = self.guest.unslide_text(target)
-                print('MakeName(%#x, "ZZ_%s_%s")' % (target, kind, name.as_str()))
+                print('MakeName(%#x, "ZZ_%s_%s_%x"); MakeFunction(%#x)' % (target, kind, name.as_str(), i, target))
 
 class Killer(GuestStruct):
     statemgr = prop(0x28, StateMgr)
@@ -213,6 +229,10 @@ class Entity(GuestStruct):
     min_y = prop(0x94, f32)
     vtable = prop(0xb4, GuestPtrPtr)
     sizeof_star = 0xb8
+
+class EditEntity(Entity):
+    rect = prop(0xc8, Rect)
+    eapd = prop(0x304, lambda: ptr_to(EditActorPlacementData))
 
 class PYES(Entity):
     loc = prop(0xb8, Point3D)
@@ -297,14 +317,33 @@ class ObjLink(GuestStruct):
 
 global_root = lambda guest: ObjLink(guest, guest.read32(guest.slide_data(0x1036C1B0)))
 
+class SpawnRect(GuestStruct):
+    x = prop(0x00, u32)
+    y = prop(0x04, u32)
+    halfwidth = prop(0x08, u32)
+    halfheight = prop(0x0c, u32)
+    bits = prop(0x10, u16)
+
 class ObjRec(GuestStruct):
     vt = prop(4, u32)
     ctor = prop(8, u32)
     idee = prop(0xc, u32)
+    spawn_rect = prop(0x14, ptr_to(SpawnRect))
     name = prop(0x20, ptr_to(GuestCString))
     @functools.lru_cache(None)
     def get_name(self):
         return '%s(%x)' % (self.name.as_str(), self.idee)
+    @staticmethod
+    @functools.lru_cache(None)
+    def by_idee(idee, guest):
+        objrecs_by_idee = fixed_array(ptr_to(ObjRec), 0xee)(guest, guest.slide_data(0x101CF5B0))
+        return objrecs_by_idee[idee]
+
+@functools.lru_cache(None)
+def exported_type_to_idee(n, guest):
+    array = fixed_array(u32, 70)(guest, guest.slide_data(0x103354FC))
+    return array[n]
+
 
 class AllocLink(GuestStruct):
     prev = prop(0, ptr_to(lambda: AllocLink))
@@ -312,17 +351,25 @@ class AllocLink(GuestStruct):
 class AllocTracker(AllocLink):
     obj_count = prop(8, u32)
     link_offset = prop(0xc, u32)
+    sizeof_star = 0x10
     def iter_allocs(self):
         link_offset = self.link_offset
         link = self.next
         while link != self:
+            next = link.next
             yield link.raw_offset(-link_offset, GuestPtr)
-            link = link.next
+            link = next
+    def iter_allocs_rev(self):
+        link_offset = self.link_offset
+        link = self.prev
+        while link != self:
+            prev = link.prev
+            yield link.raw_offset(-link_offset, GuestPtr)
+            link = prev
 
-objrecs_by_idee = lambda guest: fixed_array(ptr_to(ObjRec), 0xee)(guest, guest.slide_data(0x101CF5B0))
 
 class MP5(GuestStruct):
-    pointers = prop(0, count_ptr(ptr_to(PYES)))
+    pointers = prop(0, count_ptr(ptr_to(Entity)))
 
 class FancyString(GuestStruct):
     cstr = prop(0, ptr_to(GuestCString))
@@ -348,15 +395,29 @@ class MakesPlayerObj(GuestStruct):
     def get(guest):
         return MakesPlayerObj(guest, guest.read32(guest.slide_data(0x10194B08)))
 
+class Spawner(GuestStruct):
+    counts = prop(0xa04, fixed_array(u32, 6))
+    @staticmethod
+    def get(guest):
+        return Spawner(guest, guest.read32(guest.slide_data(0x10194B00)))
+
 class SomeCoiListSub1(GuestStruct):
     tracker = prop(0, AllocTracker)
+    counts = prop(0xa40, fixed_array(u32, 0x24//4))
     sizeof_star = 0xa6c
 class SomeCoiList(GuestStruct):
     sub1s = prop(0x18, fixed_array(SomeCoiListSub1, 2))
     @staticmethod
     def get_ptr(guest):
         return ptr_to(SomeCoiList)(guest, guest.slide_data(0x10195644))
-class EditActorPlacementData(GuestStruct):
+
+class GroundsTrackers(GuestStruct):
+    trackers = prop(0x10, fixed_array(AllocTracker, 7))
+    @staticmethod
+    def get_ptr(guest):
+        return ptr_to(GroundsTrackers)(guest, guest.slide_data(0x10194F34))
+
+class CdtObjectInternal(GuestStruct):
     x = prop(0, f32)
     y = prop(4, f32)
     q = prop(8, f32)
@@ -368,19 +429,114 @@ class EditActorPlacementData(GuestStruct):
     my_type = prop(0x20, u8)
     child_type = prop(0x21, u8)
     link_id = prop(0x22, u16)
-    effect_idx = prop(0x24, u16)
+    effect_id = prop(0x24, u16)
     my_transform_id = prop(0x26, u8)
     child_transform_id = prop(0x27, u8)
+    sizeof_star = 0x30
+
+    def desc(self):
+        objrec = ObjRec.by_idee(exported_type_to_idee(self.my_type, self.guest), self.guest)
+        return f'COI@{self.addr:#x}: type={objrec.name}(e:{self.my_type:x}) pos=({self.x}, {self.y}, {self.q}) size=({self.width, self.height}) flags={self.my_flags:x} ...'
+
+class EditActorPlacementData(CdtObjectInternal):
+    category = prop(0x108, u32)
+    edit_entity = prop(0x80, ptr_to(EditEntity))
+    bgunitgroup_idee = prop(0xfc, u32)
+    sizeof_star = 0x198
 
 class CourseThing(GuestStruct):
-    center_x = prop(0x88, f32)
-    camera_left = prop(0x90, f32)
-    camera_right = prop(0x98, f32)
+
+    course_bounds = prop(0x60, Rect)
+    alt_bounds = prop(0x70, Rect)
+    course_size = prop(0x80, Point2D)
+    center = prop(0x88, Point2D)
+    camera_rect = prop(0x90, Rect)
     alt_left = prop(0xa0, f32)
     alt_right = prop(0xa8, f32)
+    zoom = prop(0xb8, f32)
     def get_ptr(guest):
         return ptr_to(CourseThing)(guest, guest.slide_data(0x1019B2EC))
 
+class MP2SubBucket(GuestStruct):
+    idee = prop(0x00, u32)
+    x = prop(0x04, f32)
+    y = prop(0x08, f32)
+    f_c = prop(0x0c, f32)
+    f_10 = prop(0x10, f32)
+    stackid = prop(0x18, u16)
+    idx_in_tower = prop(0x1c, u32)
+    f20 = prop(0x20, u32)
+    f24 = prop(0x24, u32)
+    flags = prop(0x34, u8)
+    sub_idee = prop(0x50, u32)
+    link = prop(0x5c, AllocLink)
+
+class CTracker(GuestStruct):
+    last_used = prop(0x00, ptr_to(AllocLink))
+    first_used = prop(0x04, ptr_to(AllocLink))
+    used_count = prop(0x08, u32)
+    also_buckets_ptr = prop(0x0c, u32)
+    buckets_ptr = prop(0x10, u32)
+    count = prop(0x14, u32)
+    def iter_allocs(self):
+        link = self.first_used
+        offset = offsetof(self.item_cls, 'link')
+        while link != self:
+            yield link.raw_offset(-offset, self.item_cls)
+            link = link.next
+
+class MP2Sub(CTracker):
+    item_cls = MP2SubBucket
+
+class MP2(GuestStruct):
+    sub = prop(0x10, MP2Sub)
+    def get_ptr(guest):
+        return ptr_to(MP2)(guest, guest.slide_data(0x10194B10))
+
+
+class StrBinaryTree(GuestStruct):
+    left = prop(0, ptr_to(lambda: StrBinaryTree))
+    right = prop(4, ptr_to(lambda: StrBinaryTree))
+    str = prop(0xc, ptr_to(GuestCString))
+    def print(self):
+        left, right, str = self.left, self.right, self.str
+        if left:
+            left.print()
+        print(f'{self.addr:#x}: {str}')
+        if right:
+            right.print()
+
+class LinkedCOI(CdtObjectInternal):
+    link = prop(0x30, AllocLink)
+
+class LinkedCOITracker(CTracker):
+    item_cls = LinkedCOI
+    sizeof_star = 0x238d8
+
+class UndodogSub(GuestStruct):
+    to_create = prop(0, fixed_array(LinkedCOITracker, 2))
+    to_delete = prop(0x471b0, fixed_array(LinkedCOITracker, 2))
+    point = prop(0x941a0, Point2D)
+    # ...
+    bytes = prop(0x941bc, fixed_array(u8, 16))
+    sizeof_star = 0x941d0
+
+class Undodog(GuestStruct):
+    subs = prop(0x18, fixed_array(UndodogSub, 21))
+    cur_sub_idx = prop(0xc70730, s32)
+    @staticmethod
+    def get(guest):
+        return Undodog(guest, guest.read32(guest.slide_data(0x10195AEC)))
+
+class KulerClassification(GuestStruct):
+    idee = prop(0, u32)
+    group = prop(4, u32)
+    sizeof_star = 8
+class Kuler(GuestStruct):
+    classifications = prop(0x18, fixed_array(KulerClassification, 76))
+    @staticmethod
+    def get(guest):
+        return Kuler(guest, guest.read32(guest.slide_data(0x101950DC)))
 def main():
     real_guest = MemrwGuest.with_hostport(sys.argv[1])
     guest = CachingGuest(real_guest)
@@ -398,10 +554,9 @@ def main():
                 print('%s: %d' % (objrec.get_name(), len(yatsus)))
 
     with guest:
-        _objrecs_by_idee = objrecs_by_idee(guest)
         if 0:
             for i in range(0xee):
-                _objrec = _objrecs_by_idee[i]
+                _objrec = ObjRec.by_idee(i, guest)
                 #print(i, hex(i), _objrec.name, hex(_objrec.vt), hex(_objrec.ctor))
                 print('_%x_%s = 0x%x,' % (i, _objrec.name.as_str(), i))
             return
@@ -409,7 +564,7 @@ def main():
             brickish_edit_types = guest.slide_data(0x101D227C)
             for i in range(21):
                 idee = guest.read32(brickish_edit_types + 4 * i)
-                print('%#x: %s' % (i, _objrecs_by_idee[idee].name))
+                print('%#x: %s' % (i, ObjRec.by_idee(idee, guest).name))
             return
 
 
@@ -423,18 +578,43 @@ def main():
                 player = obj.cast(Player)
                 break
 
-    if 1:
+    if 0:
         im = guest.read(0x4ccfbd00, 1280*720*4) 
         open('/tmp/im.rgba', 'wb').write(im)
         return
 
-    if 0:
+    if 1 and sys.argv[2] == 'heaps':
         with guest:
             for heap in mpobj.heaps:
-                print(heap, heap.name.cstr)
+                print(f'{heap}: {heap.name.cstr} elm_size={heap.elm_size:#x} #free={heap.free_size / heap.elm_size}')
 
+    if 0:
+        with guest:
+            for yatsu in mpobj.mp5.pointers.get_all():
+                if not yatsu: continue
+                #if yatsu.objrec.idee == 0x2e: # 0x32: # Player
+                #    #yatsu.cast(PYES).loc.x = 3292.105957
+                #    yatsu.cast(PYES).loc.x -= 5
+                #    print(yatsu.cast(PYES).loc.y)
+                # x=3350.86 is near-optimal
+                # for y:
+                # 292 bad
+                # 292.3 ok
+                #if yatsu.objrec.idee == 0x23: # Dossun
+                #    yatsu.cast(PYES).loc.x = 3350.86
+                #    yatsu.cast(PYES).loc.y = 292.3
 
-    if 1:
+                #if yatsu.objrec.idee == 0x2e: # giant BlackPakkun
+                #    yatsu.cast(PYES).loc.x = 3304+8+7
+                #if yatsu.objrec.idee == 0x23: # Dossun
+                #    yatsu.cast(PYES).loc.y -= 0.1
+                #if yatsu.objrec.idee == 0x1d: # PowBlock
+                #    yatsu.cast(PYES).loc.x += 100
+        return
+
+    if 0:
+        StateMgr(guest, 0x2c3445a0+0x10).print_cbs()
+    if 1 and sys.argv[2] == 'ent':
         with guest:
             #print_yatsu_counts()
             #print(mpobj.mp5.pointers.base)
@@ -445,35 +625,67 @@ def main():
                     #yatsu.objrec.idee == 0x20 # Met
                     #yatsu.objrec.idee == 0x1c # PSwitch
                     # yatsu.objrec.idee == 0x14 # HatenaBlock
+                    #yatsu.objrec.idee == 0x22 # Dossun
+                    #yatsu.objrec.idee == 0x48 # FirePakkun
                     True
                 ):
                     #dump(yatsu)
                     #print(yatsu.vtable)
-                    print('%s @ %f,%f [%f,%f] %s %#x' % (yatsu.objrec.get_name(), yatsu.loc.x, yatsu.loc.y, yatsu.loc.x % 16, yatsu.loc.y % 16, yatsu, yatsu.idbits))
+                    name = yatsu.objrec.get_name()
+                    if name.startswith('Edit'):
+                        yatsu = yatsu.cast(EditEntity)
+                        loc_str = '%f,%f – %f,%f' % (yatsu.rect.min.x, yatsu.rect.min.y, yatsu.rect.max.x, yatsu.rect.max.y)
+                        eapd_str = ' eapd=%s' % (yatsu.eapd,)
+                    else:
+                        yatsu = yatsu.cast(PYES)
+                        loc_str = '%f,%f' % (yatsu.loc.x, yatsu.loc.y)
+                        eapd_str = ''
+                    print('%s @ %s %s %#x%s' % (name, loc_str, yatsu, yatsu.idbits, eapd_str))
                     #print(yatsu.loc)
 
-    if 0:
-        with guest:
-            bp_y = None
-            for yatsu in mpobj.mp5.pointers.get_all():
-                if yatsu and yatsu.objrec.idee == 0x1c: # PSwitch
-                    yatsu.loc.x, yatsu.loc.y = 200., 141.949997
-                    #print(yatsu.loc.get())
 
-    if 0:
+    if 1 and sys.argv[2] == 'eapd':
         with guest:
             scl = SomeCoiList.get_ptr(guest).get()
             for sub1 in scl.sub1s[:1]:
                 tracker = sub1.tracker
-                for eapd in tracker.iter_allocs():
+                print(tracker)
+                for eapd in tracker.iter_allocs_rev():
                     eapd = eapd.cast(EditActorPlacementData)
-                    print(eapd.my_type)
-                    if eapd.my_type == 44:
-                        eapd.my_type = 51
-                    #print(eapd.x, eapd.y)
-                    #eapd.x -= 6*16
-                    #if eapd.x < 0: eapd.x = 0
+                    #if eapd.my_type != 0xc: continue
+                    objrec = ObjRec.by_idee(exported_type_to_idee(eapd.my_type, guest), guest)
+                    name = objrec.get_name()
+                    print(f'({eapd.x}, {eapd.y}): {name} mt={eapd.my_type:x} k={eapd.category} ct={eapd.child_type:x} f={eapd.my_flags:x} {eapd} eent={eapd.edit_entity}')
+                    if eapd.x == 3096 and eapd.y == 24:
+                        eapd.y += 16
+    if 1 and sys.argv[2] == 'count':
+        with guest:
+            scl = SomeCoiList.get_ptr(guest).get()
+            scl.sub1s[0].counts[0] = 50
+            scl.sub1s[0].counts[1] = 50
+            for i, sub1 in enumerate(scl.sub1s):
+                print(f'world {i} counts: ({sub1.counts})')
+                for j, count in enumerate(sub1.counts.get_all()):
+                    print(f'   {j}: {count}')
+    if 0:
+        with guest:
+            spawner = Spawner.get(guest)
+            for j, count in enumerate(spawner.counts.get_all()):
+                print(f'   {j}: {count}')
+            #spawner.counts[0] += 80
+            #print(spawner)
 
+    if 0:
+        with guest:
+            mps = MP2.get_ptr(guest).get().sub
+            for buck in mps.iter_allocs():
+                objrec = ObjRec.by_idee(buck.idee, guest)
+                spawn_rect = objrec.spawn_rect
+                center = buck.x + spawn_rect.x
+                halfwidth = spawn_rect.halfwidth
+                left, right = center - halfwidth, center + halfwidth
+                print(f'{buck.x}, {buck.y} ({buck.f_c}, {buck.f_10}) idee=0x{buck.idee:x}:{objrec.name.as_str()} l/r=({left}, {right})')
+                #print(f'20={buck.f20:x} 24={buck.f24:x} flags:{buck.flags:x} {buck}')
     if 0:
         print(player.loc.x)
         #player.loc.x = 0
@@ -482,16 +694,92 @@ def main():
         print(player)
 
     if 0:
+        guest.write32(guest.slide_text(0x022152CC), 0x48000048) # patch to enable unlimited selection
+
+    if 1 and sys.argv[2] == 'zoom':
+        zoom = float(sys.argv[3])
+        if zoom != 1:
+            guest.write32(guest.slide_text(0x023BC0D0), 0x7c031800) # patch to avoid crash in non-SMBU themes (changes rendering)
+        coursething = CourseThing.get_ptr(guest).get()
+        #print(addrof(coursething, 'camera_rect'))
+        coursething.zoom = zoom
+        if False and zoom == 1:
+            time.sleep(0.5)
+            guest.write32(guest.slide_text(0x023BC0D0), 0x2c030000) # undo previous patch
+
+    if sys.argv[2] == 'cherry':
+        # allow weird objects to come out of pipes/blasters:
+        guest.write32(guest.slide_text(0x02636570), 0x38600001)
+        guest.write32(guest.slide_text(0x0263652C), 0x38600001)
+        guest.write32(guest.slide_text(0x0209E118), 0x60000000)
+        # change 1up mushroom to point to Player:
+        for i in range(4):
+            guest.write32(guest.slide_data(0x1019ffcc + 4 * i), 0x32)
+        # 'fixes' crash due to spawned Marios' invisible shellmets
+        # guest.write32(guest.slide_text(0x026C40E0), 0x7c031800)
+        guest.write32(guest.slide_text(0x026AA9A0), 0x60000000) # better patch that just disables that
+        # 0x2838CD8 -> 3b000032
+        print('ok')
+
+    if 0:
         dx = 1500
         coursething = CourseThing.get_ptr(guest).get()
         player.loc.x += dx
         player.old_loc.x += dx
         player.another_loc.x += dx
-        coursething.center_x += dx
-        coursething.camera_left += dx
-        coursething.camera_right += dx
+        coursething.center.x += dx
+        coursething.camera_rect.min.x += dx
+        coursething.camera_rect.max.x += dx
         coursething.alt_left += dx
         coursething.alt_right += dx
+    if 0:
+        StrBinaryTree(guest, 0x107190d8).print()
+    if 0:
+        spawn_radius = f32(guest, guest.slide_data(0x1000FFB0))
+        print(spawn_radius.get())
+        spawn_radius.set(47)
+        #spawn_radius.set(-50)
+    if 0:
+        with guest:
+            for tracker_idx, tracker in enumerate(GroundsTrackers.get_ptr(guest).get().trackers):
+                print(f'tracker {tracker_idx} ({tracker}): count={tracker.obj_count}')
+                for obj in tracker.iter_allocs():
+                    print(obj)
+
+    if 0:
+        with guest:
+            undodog = Undodog.get(guest)
+            print(undodog)
+            print(f'cur_sub_idx = {undodog.cur_sub_idx}')
+            #for idx_off in range(20, -1, -1):
+            for idx_off in range(21):
+                idx = (undodog.cur_sub_idx + idx_off + 1) % 21
+                print(f'sub[{idx}]:')
+                sub = undodog.subs[idx]
+                print(f'bytes: {sub.bytes.get_all()}')
+
+                for prop in ['to_create', 'to_delete']:
+                    for idx in range(2):
+                        tracker = getattr(sub, prop)[idx]
+                        print(f'  {prop}[{idx}]: tracker={tracker} count={tracker.count}')
+                        for linked_coi in tracker.iter_allocs():
+                            print(f'    {linked_coi.desc()}')
+
+    if 0:
+        for i in range(70):
+            idee = exported_type_to_idee(i, guest)
+            objrec = ObjRec.by_idee(idee, guest)
+            print(f'{i:x} -> {idee:x} -> {objrec.name}')
+
+    if 0:
+        kuler = Kuler.get(guest)
+        for i, c in enumerate(kuler.classifications):
+            idee = c.idee
+            try:
+                name = ObjRec.by_idee(idee, guest).name
+            except IndexError:
+                name = f'idee?{idee:#x}'
+            print(f'{c.group}: {name}')
     return
 
     #dump(sys.stdout, mpobj.tracker)
@@ -512,8 +800,6 @@ def main():
             #print(addrof(player, 'min_y'))
             #print(player, hex(player.flags_430), hex(player.flags_434), player.y, player.min_y)
             time.sleep(0.05)
-    
-
 
     #link = ObjLink(guest, guest.read32(slide_data(0x1036C1B0)))
     #while link:
